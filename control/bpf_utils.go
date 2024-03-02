@@ -226,6 +226,7 @@ retryLoadBpf:
 			tproxyPort      uint32
 			controlPlanePid uint32
 			dae0Ifindex     uint32
+			dae0peerIfindex uint32
 			dae0NetnsId     uint32
 			dae0peerMac     [6]byte
 			padding         [2]byte
@@ -233,6 +234,7 @@ retryLoadBpf:
 			tproxyPort:      uint32(opts.BigEndianTproxyPort),
 			controlPlanePid: uint32(os.Getpid()),
 			dae0Ifindex:     uint32(GetDaeNetns().Dae0().Attrs().Index),
+			dae0peerIfindex: uint32(GetDaeNetns().Dae0Peer().Attrs().Index),
 			dae0NetnsId:     uint32(netnsID),
 			dae0peerMac:     [6]byte(GetDaeNetns().Dae0Peer().Attrs().HardwareAddr),
 		},

@@ -307,42 +307,22 @@ func (ns *DaeNetns) setupIPv4Datapath() (err error) {
 	}
 	defer netns.Set(ns.hostNs)
 
-	// (ip net e daens) ip a a 169.254.0.11 dev dae0peer
-	// Although transparent UDP socket doesn't use this IP, it's still needed to make proper L3 header
-	ip, ipNet, err := net.ParseCIDR("169.254.0.11/32")
+	// (ip net e daens) ip a a 169.254.0.1 dev dae0peer
+	ip, ipNet, err := net.ParseCIDR("169.254.0.1/32")
 	ipNet.IP = ip
 	if err != nil {
-		return fmt.Errorf("failed to parse ip 169.254.0.11: %v", err)
+		return fmt.Errorf("failed to parse ip 169.254.0.1: %v", err)
 	}
 	if err = netlink.AddrAdd(ns.dae0peer, &netlink.Addr{IPNet: ipNet}); err != nil {
 		return fmt.Errorf("failed to add v4 addr to dae0peer: %v", err)
 	}
-	// (ip net e daens) ip r a 169.254.0.1 dev dae0peer
-	// 169.254.0.1 is the link-local address used for ARP caching
-	if err = netlink.RouteAdd(&netlink.Route{
-		LinkIndex: ns.dae0peer.Attrs().Index,
-		Dst:       &net.IPNet{IP: net.ParseIP("169.254.0.1"), Mask: net.CIDRMask(32, 32)},
-		Gw:        nil,
-		Scope:     netlink.SCOPE_LINK,
-	}); err != nil {
-		return fmt.Errorf("failed to add v4 route1 to dae0peer: %v", err)
-	}
-	// (ip net e daens) ip r a default via 169.254.0.1 dev dae0peer
-	if err = netlink.RouteAdd(&netlink.Route{
-		LinkIndex: ns.dae0peer.Attrs().Index,
+	// (ip net e daens) ip r r default dev lo
+	if err = netlink.RouteReplace(&netlink.Route{
+		LinkIndex: consts.LoopbackIfIndex,
 		Dst:       &net.IPNet{IP: net.IPv4(0, 0, 0, 0), Mask: net.CIDRMask(0, 32)},
-		Gw:        net.ParseIP("169.254.0.1"),
+		Gw:        nil,
 	}); err != nil {
-		return fmt.Errorf("failed to add v4 route2 to dae0peer: %v", err)
-	}
-	// (ip net e daens) ip n r 169.254.0.1 dev dae0peer lladdr $mac_dae0 nud permanent
-	if err = netlink.NeighSet(&netlink.Neigh{
-		IP:           net.ParseIP("169.254.0.1"),
-		HardwareAddr: ns.dae0.Attrs().HardwareAddr,
-		LinkIndex:    ns.dae0peer.Attrs().Index,
-		State:        netlink.NUD_PERMANENT,
-	}); err != nil {
-		return fmt.Errorf("failed to add neigh to dae0peer: %v", err)
+		return fmt.Errorf("failed to add default dev lo: %v", err)
 	}
 	return
 }
@@ -372,6 +352,7 @@ func (ns *DaeNetns) setupIPv6Datapath() (err error) {
 	}); err != nil {
 		return fmt.Errorf("failed to add v6 route to dae0peer: %v", err)
 	}
+
 	// (ip net e daens) ip n r fe80::ecee:eeff:feee:eeee dev dae0peer lladdr $mac_dae0 nud permanent
 	if err = netlink.NeighSet(&netlink.Neigh{
 		IP:           net.ParseIP("fe80::ecee:eeff:feee:eeee"),

@@ -170,6 +170,7 @@ struct dae_param {
   __u32 tproxy_port;
   __u32 control_plane_pid;
   __u32 dae0_ifindex;
+  __u32 dae0peer_ifindex;
   __u32 dae_netns_id;
   __u8 dae0peer_mac[6];
   __u8 padding[2];
@@ -1066,6 +1067,16 @@ direct:
 
 block:
   return TC_ACT_SHOT;
+}
+
+SEC("tc/daens_lo_egress")
+int tproxy_daens_lo_egress(struct __sk_buff *skb) {
+  return bpf_redirect(skb->ifindex, BPF_F_INGRESS);
+}
+
+SEC("tc/daens_lo_ingress")
+int tproxy_daens_lo_ingress(struct __sk_buff *skb) {
+  return bpf_redirect_peer(PARAM.dae0peer_ifindex, 0);
 }
 
 // Cookie will change after the first packet, so we just use it for
