@@ -449,11 +449,106 @@ func (c *controlPlaneCore) _bindWan(ifname string) error {
 		return nil
 	})
 
+	filterWanIngress := &netlink.BpfFilter{
+		FilterAttrs: netlink.FilterAttrs{
+			LinkIndex: link.Attrs().Index,
+			Parent:    netlink.HANDLE_MIN_INGRESS,
+			Handle:    netlink.MakeHandle(0x2022, 0b010+uint16(c.flip)),
+			Protocol:  unix.ETH_P_ALL,
+			Priority:  1,
+		},
+		Fd:           c.bpf.bpfPrograms.TproxyWanIngress.FD(),
+		Name:         consts.AppName + "_wan_ingress",
+		DirectAction: true,
+	}
+	_ = netlink.FilterDel(filterWanIngress)
+	// Remove and add.
+	if !c.isReload {
+		// Clean up thoroughly.
+		filterIngressFlipped := deepcopy.Copy(filterWanIngress).(*netlink.BpfFilter)
+		filterIngressFlipped.FilterAttrs.Handle ^= 1
+		_ = netlink.FilterDel(filterIngressFlipped)
+	}
+	if err := netlink.FilterAdd(filterWanIngress); err != nil {
+		return fmt.Errorf("cannot attach ebpf object to filter ingress: %w", err)
+	}
+	c.deferFuncs = append(c.deferFuncs, func() error {
+		if err := netlink.FilterDel(filterWanIngress); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("FilterDel(%v:%v): %w", link.Attrs().Name, filterWanIngress.Name, err)
+		}
+		return nil
+	})
+
 	return nil
 }
 
 func (c *controlPlaneCore) bindDaens() (err error) {
 	daens := GetDaeNetns()
+
+	// lo inside daens
+	daens.With(func() error {
+		return c.addQdisc("lo")
+	})
+
+	filterLoIngress := &netlink.BpfFilter{
+		FilterAttrs: netlink.FilterAttrs{
+			LinkIndex: 1,
+			Parent:    netlink.HANDLE_MIN_INGRESS,
+			Handle:    netlink.MakeHandle(0x2022, 0b010+uint16(c.flip)),
+			Protocol:  unix.ETH_P_ALL,
+			Priority:  0,
+		},
+		Fd:           c.bpf.bpfPrograms.TproxyDaensLoIngress.FD(),
+		Name:         consts.AppName + "_lo_ingress",
+		DirectAction: true,
+	}
+	daens.With(func() error {
+		return netlink.FilterDel(filterLoIngress)
+	})
+	// Remove and add.
+	if !c.isReload {
+		// Clean up thoroughly.
+		filterIngressFlipped := deepcopy.Copy(filterLoIngress).(*netlink.BpfFilter)
+		filterIngressFlipped.FilterAttrs.Handle ^= 1
+		daens.With(func() error {
+			return netlink.FilterDel(filterLoIngress)
+		})
+	}
+	if err = daens.With(func() error {
+		return netlink.FilterAdd(filterLoIngress)
+	}); err != nil {
+		return fmt.Errorf("cannot attach ebpf object to filter ingress: %w", err)
+	}
+
+	filterLoEgress := &netlink.BpfFilter{
+		FilterAttrs: netlink.FilterAttrs{
+			LinkIndex: 1,
+			Parent:    netlink.HANDLE_MIN_EGRESS,
+			Handle:    netlink.MakeHandle(0x2023, 0b100+uint16(c.flip)),
+			Protocol:  unix.ETH_P_ALL,
+			Priority:  2,
+		},
+		Fd:           c.bpf.bpfPrograms.TproxyDaensLoEgress.FD(),
+		Name:         consts.AppName + "_lo_egress",
+		DirectAction: true,
+	}
+	daens.With(func() error {
+		return netlink.FilterDel(filterLoEgress)
+	})
+	// Remove and add.
+	if !c.isReload {
+		// Clean up thoroughly.
+		filterEgressFlipped := deepcopy.Copy(filterLoEgress).(*netlink.BpfFilter)
+		filterEgressFlipped.FilterAttrs.Handle ^= 1
+		daens.With(func() error {
+			return netlink.FilterDel(filterEgressFlipped)
+		})
+	}
+	if err := daens.With(func() error {
+		return netlink.FilterAdd(filterLoEgress)
+	}); err != nil {
+		return fmt.Errorf("cannot attach ebpf object to filter egress: %w", err)
+	}
 
 	// tproxy_dae0peer_ingress@eth0 at dae netns
 	daens.With(func() error {

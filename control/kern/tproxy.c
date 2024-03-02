@@ -18,7 +18,7 @@
 // #define __DEBUG_ROUTING
 // #define __PRINT_ROUTING_RESULT
 // #define __PRINT_SETUP_PROCESS_CONNNECTION
-// #define __DEBUG
+//define __DEBUG
 // #define __UNROLL_ROUTE_LOOP
 
 #ifndef __DEBUG
@@ -170,6 +170,7 @@ struct dae_param {
   __u32 tproxy_port;
   __u32 control_plane_pid;
   __u32 dae0_ifindex;
+  __u32 dae0peer_ifindex;
   __u32 dae_netns_id;
   __u8 dae0peer_mac[6];
   __u8 padding[2];
@@ -835,6 +836,7 @@ static __always_inline __u32 get_link_h_len(__u32 ifindex,
   return 0;
 }
 
+/*
 static __always_inline int
 lookup_and_assign_tcp_established(struct __sk_buff *skb, struct bpf_sock_tuple *tuple, __u32 len)
 {
@@ -847,11 +849,13 @@ lookup_and_assign_tcp_established(struct __sk_buff *skb, struct bpf_sock_tuple *
 		goto release;
 	}
 
+	bpf_printk("lookup_and_assign_tcp_established\n");
 	ret = bpf_sk_assign(skb, sk, 0);
 release:
 	bpf_sk_release(sk);
 	return ret;
 }
+*/
 
 static __always_inline int
 assign_listener(struct __sk_buff *skb, __u8 l4proto)
@@ -865,6 +869,7 @@ assign_listener(struct __sk_buff *skb, __u8 l4proto)
 	if (!sk)
 		return -1;
 
+	bpf_printk("assign_listener\n");
 	int ret = bpf_sk_assign(skb, sk, 0);
 	bpf_sk_release(sk);
 	return ret;
@@ -903,7 +908,7 @@ redirect_to_control_plane(struct __sk_buff *skb, __u32 link_h_len,
   bpf_map_update_elem(&redirect_track, &redirect_tuple, &redirect_entry, BPF_ANY);
 
   skb->cb[0] = TPROXY_MARK;
-  return bpf_redirect(PARAM.dae0_ifindex, 0);
+  return bpf_redirect_peer(PARAM.dae0_ifindex, 0);
 }
 
 SEC("tc/ingress")
@@ -1369,72 +1374,75 @@ int tproxy_wan_egress(struct __sk_buff *skb) {
 
   }
 
-  return redirect_to_control_plane(skb, link_h_len, &tuples, l4proto, &ethh, 1);
+  skb->cb[0] = TPROXY_MARK;
+  /* Redirect from L3 dev to L2 dev, e.g. wg0 -> veth */
+  if (!link_h_len) {
+    __u16 l3proto = skb->protocol;
+    bpf_skb_change_head(skb, sizeof(struct ethhdr), 0);
+    bpf_skb_store_bytes(skb, offsetof(struct ethhdr, h_proto),
+			&l3proto, sizeof(l3proto), 0);
+  }
+
+  bpf_skb_store_bytes(skb, offsetof(struct ethhdr, h_dest),
+		      (void *)&PARAM.dae0peer_mac, sizeof(ethh.h_dest), 0);
+
+  struct redirect_tuple redirect_tuple = {};
+  if (skb->protocol == bpf_htons(ETH_P_IP)) {
+    redirect_tuple.sip.u6_addr32[3] = tuples.five.sip.u6_addr32[3];
+    redirect_tuple.dip.u6_addr32[3] = tuples.five.dip.u6_addr32[3];
+  } else {
+    __builtin_memcpy(&redirect_tuple.sip, &tuples.five.sip, IPV6_BYTE_LENGTH);
+    __builtin_memcpy(&redirect_tuple.dip, &tuples.five.dip, IPV6_BYTE_LENGTH);
+  }
+  redirect_tuple.l4proto = l4proto;
+  struct redirect_entry redirect_entry = {};
+  redirect_entry.ifindex = skb->ifindex;
+  redirect_entry.from_wan = 1;
+  __builtin_memcpy(redirect_entry.smac, ethh.h_source, sizeof(ethh.h_source));
+  __builtin_memcpy(redirect_entry.dmac, ethh.h_dest, sizeof(ethh.h_dest));
+  bpf_map_update_elem(&redirect_track, &redirect_tuple, &redirect_entry, BPF_ANY);
+
+  if ((l4proto == IPPROTO_TCP && tcph.syn) || l4proto == IPPROTO_UDP) {
+    skb->cb[1] = l4proto;
+  } else {
+    skb->cb[1] = 0;
+  }
+  return bpf_redirect(skb->ifindex, BPF_F_INGRESS);
+}
+
+SEC("tc/wan_ingress")
+int tproxy_wan_ingress(struct __sk_buff *skb) {
+    if (skb->cb[0] != TPROXY_MARK) {
+      return TC_ACT_PIPE;
+    }
+  return bpf_redirect_peer(PARAM.dae0_ifindex, 0);
+}
+
+SEC("tc/daens_lo_ingress")
+int tproxy_daens_lo_ingress(struct __sk_buff *skb) {
+  return bpf_redirect_peer(PARAM.dae0peer_ifindex, 0);
+}
+
+SEC("tc/daens_lo_egress")
+int tproxy_daens_lo_egress(struct __sk_buff *skb) {
+  return bpf_redirect(skb->ifindex, BPF_F_INGRESS);
 }
 
 SEC("tc/dae0peer_ingress")
 int tproxy_dae0peer_ingress(struct __sk_buff *skb) {
-  struct ethhdr ethh;
-  struct iphdr iph;
-  struct ipv6hdr ipv6h;
-  struct icmp6hdr icmp6h;
-  struct tcphdr tcph;
-  struct udphdr udph;
-  __u8 ihl;
-  __u8 l4proto;
-  __u32 link_h_len = 14;
-
   if (skb->cb[0] != TPROXY_MARK) {
     return TC_ACT_SHOT;
   }
 
-  int ret = parse_transport(skb, link_h_len, &ethh, &iph, &ipv6h, &icmp6h,
-                            &tcph, &udph, &ihl, &l4proto);
-  if (ret) {
-    return TC_ACT_OK;
-  }
-  if (l4proto == IPPROTO_ICMPV6) {
-    return TC_ACT_OK;
-  }
-
-  struct tuples tuples;
-  get_tuples(skb, &tuples, &iph, &ipv6h, &tcph, &udph, l4proto);
-
   skb->mark = TPROXY_MARK;
   bpf_skb_change_type(skb, PACKET_HOST);
-
-  /* First look for established socket.
-   * This is done for TCP only, otherwise bpf_sk_lookup_udp would find
-   * previously created transparent socket for UDP, which is not what we want.
-   * */
-  if (l4proto == IPPROTO_TCP) {
-    __u32 tuple_size;
-    struct bpf_sock_tuple tuple = {};
-
-    if (skb->protocol == bpf_htons(ETH_P_IP)) {
-      tuple.ipv4.saddr = tuples.five.sip.u6_addr32[3];
-      tuple.ipv4.daddr = tuples.five.dip.u6_addr32[3];
-      tuple.ipv4.sport = tuples.five.sport;
-      tuple.ipv4.dport = tuples.five.dport;
-      tuple_size = sizeof(tuple.ipv4);
-    } else {
-      __builtin_memcpy(tuple.ipv6.saddr, &tuples.five.sip, IPV6_BYTE_LENGTH);
-      __builtin_memcpy(tuple.ipv6.daddr, &tuples.five.dip, IPV6_BYTE_LENGTH);
-      tuple.ipv6.sport = tuples.five.sport;
-      tuple.ipv6.dport = tuples.five.dport;
-      tuple_size = sizeof(tuple.ipv6);
-    }
-    if (lookup_and_assign_tcp_established(skb, &tuple, tuple_size) == 0) {
-      return TC_ACT_OK;
-    }
+  __u8 l4proto = skb->cb[1];
+  if (l4proto != 0) {
+    assign_listener(skb, l4proto);
   }
-
-  /* Then look for tproxy listening socket */
-  if (assign_listener(skb, l4proto) == 0) {
-    return TC_ACT_OK;
-  }
-
-  return TC_ACT_SHOT;
+  // else, do nothing, because they are tcp established packets,
+  // tcp_early_demux (TODO@gray) can handle them.
+  return TC_ACT_OK;
 }
 
 SEC("tc/dae0_ingress")

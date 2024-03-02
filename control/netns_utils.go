@@ -327,6 +327,14 @@ func (ns *DaeNetns) setupIPv4Datapath() (err error) {
 	}); err != nil {
 		return fmt.Errorf("failed to add v4 route2 to dae0peer: %v", err)
 	}
+	// (ip net e daens) ip r r default dev lo
+	if err = netlink.RouteReplace(&netlink.Route{
+		LinkIndex: consts.LoopbackIfIndex,
+		Dst:       &net.IPNet{IP: net.IPv4(0, 0, 0, 0), Mask: net.CIDRMask(0, 32)},
+		Gw:        nil,
+	}); err != nil {
+		return fmt.Errorf("failed to add default dev lo: %v", err)
+	}
 	// (ip net e daens) ip n r 169.254.0.1 dev dae0peer lladdr $mac_dae0 nud permanent
 	if err = netlink.NeighSet(&netlink.Neigh{
 		IP:           net.ParseIP("169.254.0.1"),
