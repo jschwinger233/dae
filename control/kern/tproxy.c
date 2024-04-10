@@ -778,10 +778,10 @@ int tproxy_lan_egress(struct __sk_buff *skb)
 
 	if (get_link_h_len(skb->ifindex, &link_h_len))
 		return TC_ACT_OK;
-	int ret = parse_transport(skb, link_h_len, &ethh, &iph, &ipv6h, &icmp6h,
-				  &tcph, &udph, &ihl, &l3proto, &l4proto);
+	int ret = skb_parse_transport(skb, link_h_len, &ethh, &iph, &ipv6h, &icmp6h,
+				      &tcph, &udph, &ihl, &l3proto, &l4proto);
 	if (ret) {
-		bpf_printk("parse_transport: %d", ret);
+		bpf_printk("skb_parse_transport: %d", ret);
 		return TC_ACT_OK;
 	}
 	if (l4proto == IPPROTO_ICMPV6 && icmp6h.icmp6_type == NDP_REDIRECT) {
@@ -807,10 +807,10 @@ int tproxy_lan_ingress(struct __sk_buff *skb)
 
 	if (get_link_h_len(skb->ifindex, &link_h_len))
 		return TC_ACT_OK;
-	int ret = parse_transport(skb, link_h_len, &ethh, &iph, &ipv6h, &icmp6h,
-				  &tcph, &udph, &ihl, &l3proto, &l4proto);
+	int ret = skb_parse_transport(skb, link_h_len, &ethh, &iph, &ipv6h, &icmp6h,
+				      &tcph, &udph, &ihl, &l3proto, &l4proto);
 	if (ret) {
-		bpf_printk("parse_transport: %d", ret);
+		bpf_printk("skb_parse_transport: %d", ret);
 		return TC_ACT_OK;
 	}
 	if (l4proto == IPPROTO_ICMPV6)
@@ -968,8 +968,8 @@ new_connection:
 
 	// Assign to control plane.
 control_plane:
-	return redirect_to_control_plane(skb, link_h_len, &tuples, &ethh, &tcph,
-					 0, l3proto, l4proto);
+	return skb_redirect_to_control_plane(skb, link_h_len, &tuples, &ethh, &tcph,
+					     0, l3proto, l4proto);
 
 direct:
 	return TC_ACT_OK;
@@ -1096,8 +1096,8 @@ int tproxy_wan_ingress(struct __sk_buff *skb)
 
 	if (get_link_h_len(skb->ifindex, &link_h_len))
 		return TC_ACT_OK;
-	int ret = parse_transport(skb, link_h_len, &ethh, &iph, &ipv6h, &icmp6h,
-				  &tcph, &udph, &ihl, &l3proto, &l4proto);
+	int ret = skb_parse_transport(skb, link_h_len, &ethh, &iph, &ipv6h, &icmp6h,
+				      &tcph, &udph, &ihl, &l3proto, &l4proto);
 	if (ret)
 		return TC_ACT_OK;
 	if (l4proto != IPPROTO_UDP)
@@ -1141,8 +1141,8 @@ int tproxy_wan_egress(struct __sk_buff *skb)
 	if (get_link_h_len(skb->ifindex, &link_h_len))
 		return TC_ACT_OK;
 	bool tcp_state_syn;
-	int ret = parse_transport(skb, link_h_len, &ethh, &iph, &ipv6h, &icmp6h,
-				  &tcph, &udph, &ihl, &l3proto, &l4proto);
+	int ret = skb_parse_transport(skb, link_h_len, &ethh, &iph, &ipv6h, &icmp6h,
+				      &tcph, &udph, &ihl, &l3proto, &l4proto);
 	if (ret)
 		return TC_ACT_OK;
 	if (l4proto == IPPROTO_ICMPV6)
@@ -1376,8 +1376,8 @@ int tproxy_wan_egress(struct __sk_buff *skb)
 		}
 	}
 
-	return redirect_to_control_plane(skb, link_h_len, &tuples, &ethh, &tcph,
-					 1, l3proto, l4proto);
+	return skb_redirect_to_control_plane(skb, link_h_len, &tuples, &ethh, &tcph,
+					     1, l3proto, l4proto);
 }
 
 SEC("tc/dae0peer_ingress")
@@ -1419,8 +1419,8 @@ int tproxy_dae0_ingress(struct __sk_buff *skb)
 	__u8 l4proto;
 	__u32 link_h_len = 14;
 
-	if (parse_transport(skb, link_h_len, &ethh, &iph, &ipv6h, &icmp6h,
-			    &tcph, &udph, &ihl, &l3proto, &l4proto))
+	if (skb_parse_transport(skb, link_h_len, &ethh, &iph, &ipv6h, &icmp6h,
+				&tcph, &udph, &ihl, &l3proto, &l4proto))
 		return TC_ACT_OK;
 	struct tuples tuples;
 
