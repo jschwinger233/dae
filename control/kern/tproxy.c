@@ -980,7 +980,7 @@ block:
 }
 
 SEC("xdp/ingress")
-int xdp_tproxy_lan_ingress(struct __sk_buff *skb)
+int xdp_tproxy_lan_ingress(struct xdp_md *ctx)
 {
 	struct ethhdr ethh;
 	struct iphdr iph;
@@ -991,18 +991,14 @@ int xdp_tproxy_lan_ingress(struct __sk_buff *skb)
 	__u8 ihl;
 	__u16 l3proto;
 	__u8 l4proto;
-	__u32 link_h_len;
 
-	if (get_link_h_len(skb->ifindex, &link_h_len))
-		return TC_ACT_OK;
-	int ret = skb_parse_transport(skb, link_h_len, &ethh, &iph, &ipv6h, &icmp6h,
+	int ret = xdp_parse_transport(ctx, &ethh, &iph, &ipv6h, &icmp6h,
 				      &tcph, &udph, &ihl, &l3proto, &l4proto);
-	if (ret) {
-		bpf_printk("skb_parse_transport: %d", ret);
-		return TC_ACT_OK;
-	}
+	if (ret)
+		return XDP_PASS;
+
 	if (l4proto == IPPROTO_ICMPV6)
-		return TC_ACT_OK;
+		return XDP_PASS;
 
 	// Prepare five tuples.
 	struct tuples tuples;
@@ -1027,7 +1023,7 @@ int xdp_tproxy_lan_ingress(struct __sk_buff *skb)
 	__u32 flag[8];
 	void *l4hdr;
 
-	if (skb->protocol == bpf_htons(ETH_P_IP)) {
+	if (l3proto == bpf_htons(ETH_P_IP)) {
 		tuple.ipv4.daddr = tuples.five.dip.u6_addr32[3];
 		tuple.ipv4.saddr = tuples.five.sip.u6_addr32[3];
 		tuple.ipv4.dport = tuples.five.dport;
@@ -1048,7 +1044,7 @@ int xdp_tproxy_lan_ingress(struct __sk_buff *skb)
 		if (tcph.syn && !tcph.ack)
 			goto new_connection;
 
-		sk = bpf_skc_lookup_tcp(skb, &tuple, tuple_size,
+		sk = bpf_skc_lookup_tcp(ctx, &tuple, tuple_size,
 					PARAM.dae_netns_id, 0);
 		if (sk) {
 			if (sk->state != BPF_TCP_LISTEN) {
@@ -1066,7 +1062,7 @@ new_connection:
 		if (!(tcph.syn && !tcph.ack)) {
 			// Not a new TCP connection.
 			// Perhaps single-arm.
-			return TC_ACT_OK;
+			return XDP_PASS;
 		}
 		l4hdr = &tcph;
 		flag[0] = L4ProtoType_TCP;
@@ -1074,7 +1070,7 @@ new_connection:
 		l4hdr = &udph;
 		flag[0] = L4ProtoType_UDP;
 	}
-	if (skb->protocol == bpf_htons(ETH_P_IP))
+	if (l3proto == bpf_htons(ETH_P_IP))
 		flag[1] = IpVersionType_4;
 	else
 		flag[1] = IpVersionType_6;
@@ -1092,7 +1088,7 @@ new_connection:
 			tuples.five.dip.u6_addr32, mac);
 	if (s64_ret < 0) {
 		bpf_printk("shot routing: %d", s64_ret);
-		return TC_ACT_SHOT;
+		return XDP_ABORTED;
 	}
 	struct routing_result routing_result = { 0 };
 
@@ -1119,7 +1115,7 @@ new_connection:
 				  &routing_result, BPF_ANY);
 	if (ret) {
 		bpf_printk("shot save routing result: %d", ret);
-		return TC_ACT_SHOT;
+		return XDP_ABORTED;
 	}
 #if defined(__DEBUG_ROUTING) || defined(__PRINT_ROUTING_RESULT)
 	if (l4proto == IPPROTO_TCP) {
@@ -1133,7 +1129,12 @@ new_connection:
 	}
 #endif
 	if (routing_result.outbound == OUTBOUND_DIRECT) {
-		skb->mark = routing_result.mark;
+		struct xdp_meta *meta = xdp_get_meta(ctx);
+
+		if (!meta)
+			return XDP_ABORTED;
+
+		meta->mark = routing_result.mark;
 		goto direct;
 	} else if (unlikely(routing_result.outbound == OUTBOUND_BLOCK)) {
 		goto block;
@@ -1143,7 +1144,7 @@ new_connection:
 	struct outbound_connectivity_query q = { 0 };
 
 	q.outbound = routing_result.outbound;
-	q.ipversion = skb->protocol == bpf_htons(ETH_P_IP) ? 4 : 6;
+	q.ipversion = l3proto == bpf_htons(ETH_P_IP) ? 4 : 6;
 	q.l4proto = l4proto;
 	__u32 *alive;
 
@@ -1156,14 +1157,14 @@ new_connection:
 
 	// Assign to control plane.
 control_plane:
-	return skb_redirect_to_control_plane(skb, link_h_len, &tuples, &ethh, &tcph,
-					     0, l3proto, l4proto);
+	return xdp_redirect_to_control_plane(ctx, &tuples, &ethh,
+					     &tcph, 0, l3proto, l4proto);
 
 direct:
-	return TC_ACT_OK;
+	return XDP_PASS;
 
 block:
-	return TC_ACT_SHOT;
+	return XDP_ABORTED;
 }
 
 // Cookie will change after the first packet, so we just use it for
