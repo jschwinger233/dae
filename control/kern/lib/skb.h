@@ -1,7 +1,7 @@
 static __always_inline int
-handle_ipv6_extensions(const struct __sk_buff *skb, __u32 offset, __u32 hdr,
-		       struct icmp6hdr *icmp6h, struct tcphdr *tcph,
-		       struct udphdr *udph, __u8 *ihl, __u8 *l4proto)
+skb_handle_ipv6_extensions(const struct __sk_buff *skb, __u32 offset, __u32 hdr,
+			   struct icmp6hdr *icmp6h, struct tcphdr *tcph,
+			   struct udphdr *udph, __u8 *ihl, __u8 *l4proto)
 {
 	__u8 hdr_length = 0;
 	__u8 nexthdr = 0;
@@ -90,10 +90,10 @@ special_n1:
 }
 
 static __always_inline int
-parse_transport(const struct __sk_buff *skb, __u32 link_h_len,
-		struct ethhdr *ethh, struct iphdr *iph, struct ipv6hdr *ipv6h,
-		struct icmp6hdr *icmp6h, struct tcphdr *tcph,
-		struct udphdr *udph, __u8 *ihl, __u16 *l3proto, __u8 *l4proto)
+skb_parse_transport(const struct __sk_buff *skb, __u32 link_h_len,
+		    struct ethhdr *ethh, struct iphdr *iph, struct ipv6hdr *ipv6h,
+		    struct icmp6hdr *icmp6h, struct tcphdr *tcph,
+		    struct udphdr *udph, __u8 *ihl, __u16 *l3proto, __u8 *l4proto)
 {
 	__u32 offset = 0;
 	int ret;
@@ -166,8 +166,8 @@ parse_transport(const struct __sk_buff *skb, __u32 link_h_len,
 
 		offset += sizeof(struct ipv6hdr);
 
-		return handle_ipv6_extensions(skb, offset, ipv6h->nexthdr,
-					      icmp6h, tcph, udph, ihl, l4proto);
+		return skb_handle_ipv6_extensions(skb, offset, ipv6h->nexthdr,
+						  icmp6h, tcph, udph, ihl, l4proto);
 	} else {
 		/// EXPECTED: Maybe ICMP, MPLS, etc.
 		// bpf_printk("IP but not supported packet: protocol is %u",
@@ -178,10 +178,10 @@ parse_transport(const struct __sk_buff *skb, __u32 link_h_len,
 }
 
 static __always_inline int
-redirect_to_control_plane(struct __sk_buff *skb, __u32 link_h_len,
-			  struct tuples *tuples,
-			  struct ethhdr *ethh, struct tcphdr *tcph,
-			  __u8 from_wan, __u16 l3proto, __u8 l4proto)
+skb_redirect_to_control_plane(struct __sk_buff *skb, __u32 link_h_len,
+			      struct tuples *tuples,
+			      struct ethhdr *ethh, struct tcphdr *tcph,
+			      __u8 from_wan, __u16 l3proto, __u8 l4proto)
 {
 	/* Redirect from L3 dev to L2 dev, e.g. wg0 -> veth */
 	if (!link_h_len) {
