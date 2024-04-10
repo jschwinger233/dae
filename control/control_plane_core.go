@@ -318,7 +318,7 @@ func (c *controlPlaneCore) _bindLan(ifname string) error {
 			// Priority should be behind of WAN's
 			Priority: 2,
 		},
-		Fd:           c.bpf.bpfPrograms.TproxyLanIngress.FD(),
+		Fd:           c.bpf.bpfPrograms.TcTproxyLanIngress.FD(),
 		Name:         consts.AppName + "_lan_ingress",
 		DirectAction: true,
 	}
