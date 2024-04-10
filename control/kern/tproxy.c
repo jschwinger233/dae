@@ -413,14 +413,15 @@ static __always_inline __u8 ipv6_get_dscp(const struct ipv6hdr *ipv6h)
 }
 
 static __always_inline void
-get_tuples(const struct __sk_buff *skb, struct tuples *tuples,
+get_tuples(struct tuples *tuples,
 	   const struct iphdr *iph, const struct ipv6hdr *ipv6h,
-	   const struct tcphdr *tcph, const struct udphdr *udph, __u8 l4proto)
+	   const struct tcphdr *tcph, const struct udphdr *udph,
+	   __u16 l3proto, __u8 l4proto)
 {
 	__builtin_memset(tuples, 0, sizeof(*tuples));
 	tuples->five.l4proto = l4proto;
 
-	if (skb->protocol == bpf_htons(ETH_P_IP)) {
+	if (l3proto == bpf_htons(ETH_P_IP)) {
 		tuples->five.sip.u6_addr32[2] = bpf_htonl(0x0000ffff);
 		tuples->five.sip.u6_addr32[3] = iph->saddr;
 
@@ -1042,7 +1043,7 @@ int tproxy_lan_ingress(struct __sk_buff *skb)
 	// Prepare five tuples.
 	struct tuples tuples;
 
-	get_tuples(skb, &tuples, &iph, &ipv6h, &tcph, &udph, l4proto);
+	get_tuples(&tuples, &iph, &ipv6h, &tcph, &udph, l3proto, l4proto);
 
 	/*
    * ip rule add fwmark 0x8000000/0x8000000 table 2023
@@ -1330,7 +1331,7 @@ int tproxy_wan_ingress(struct __sk_buff *skb)
 	struct tuples tuples;
 	struct tuples_key reversed_tuples_key;
 
-	get_tuples(skb, &tuples, &iph, &ipv6h, &tcph, &udph, l4proto);
+	get_tuples(&tuples, &iph, &ipv6h, &tcph, &udph, l3proto, l4proto);
 	copy_reversed_tuples(&tuples.five, &reversed_tuples_key);
 
 	if (refresh_udp_conn_state_timer(&reversed_tuples_key))
@@ -1375,7 +1376,7 @@ int tproxy_wan_egress(struct __sk_buff *skb)
 	// Backup for further use.
 	struct tuples tuples;
 
-	get_tuples(skb, &tuples, &iph, &ipv6h, &tcph, &udph, l4proto);
+	get_tuples(&tuples, &iph, &ipv6h, &tcph, &udph, l3proto, l4proto);
 
 	// Normal packets.
 	if (l4proto == IPPROTO_TCP) {
@@ -1649,7 +1650,7 @@ int tproxy_dae0_ingress(struct __sk_buff *skb)
 		return TC_ACT_OK;
 	struct tuples tuples;
 
-	get_tuples(skb, &tuples, &iph, &ipv6h, &tcph, &udph, l4proto);
+	get_tuples(&tuples, &iph, &ipv6h, &tcph, &udph, l3proto, l4proto);
 
 	// reverse the tuple!
 	struct redirect_tuple redirect_tuple = {};
