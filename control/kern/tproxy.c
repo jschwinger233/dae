@@ -937,14 +937,14 @@ static __always_inline int assign_listener(struct __sk_buff *skb, __u8 l4proto)
 	return ret;
 }
 
-static __always_inline void prep_redirect_to_control_plane(
-	struct __sk_buff *skb, __u32 link_h_len, struct tuples *tuples,
-	__u8 l4proto, struct ethhdr *ethh, __u8 from_wan, struct tcphdr *tcph)
+static __always_inline int
+redirect_to_control_plane(struct __sk_buff *skb, __u32 link_h_len,
+			  struct tuples *tuples,
+			  struct ethhdr *ethh, struct tcphdr *tcph,
+			  __u8 from_wan, __u16 l3proto, __u8 l4proto)
 {
 	/* Redirect from L3 dev to L2 dev, e.g. wg0 -> veth */
 	if (!link_h_len) {
-		__u16 l3proto = skb->protocol;
-
 		bpf_skb_change_head(skb, sizeof(struct ethhdr), 0);
 		bpf_skb_store_bytes(skb, offsetof(struct ethhdr, h_proto),
 				    &l3proto, sizeof(l3proto), 0);
@@ -956,7 +956,7 @@ static __always_inline void prep_redirect_to_control_plane(
 
 	struct redirect_tuple redirect_tuple = {};
 
-	if (skb->protocol == bpf_htons(ETH_P_IP)) {
+	if (l3proto == bpf_htons(ETH_P_IP)) {
 		redirect_tuple.sip.u6_addr32[3] = tuples->five.sip.u6_addr32[3];
 		redirect_tuple.dip.u6_addr32[3] = tuples->five.dip.u6_addr32[3];
 	} else {
@@ -981,6 +981,8 @@ static __always_inline void prep_redirect_to_control_plane(
 	skb->cb[1] = 0;
 	if ((l4proto == IPPROTO_TCP && tcph->syn) || l4proto == IPPROTO_UDP)
 		skb->cb[1] = l4proto;
+
+	return bpf_redirect(PARAM.dae0_ifindex, 0);
 }
 
 SEC("tc/egress")
@@ -1192,9 +1194,8 @@ new_connection:
 
 	// Assign to control plane.
 control_plane:
-	prep_redirect_to_control_plane(skb, link_h_len, &tuples, l4proto, &ethh,
-				       0, &tcph);
-	return bpf_redirect(PARAM.dae0_ifindex, 0);
+	return redirect_to_control_plane(skb, link_h_len, &tuples, &ethh, &tcph,
+					 0, l3proto, l4proto);
 
 direct:
 	return TC_ACT_OK;
@@ -1601,9 +1602,8 @@ int tproxy_wan_egress(struct __sk_buff *skb)
 		}
 	}
 
-	prep_redirect_to_control_plane(skb, link_h_len, &tuples, l4proto, &ethh,
-				       1, &tcph);
-	return bpf_redirect(PARAM.dae0_ifindex, 0);
+	return redirect_to_control_plane(skb, link_h_len, &tuples, &ethh, &tcph,
+					 1, l3proto, l4proto);
 }
 
 SEC("tc/dae0peer_ingress")
