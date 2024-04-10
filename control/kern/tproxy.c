@@ -402,6 +402,7 @@ struct {
 
 // Functions:
 #include "lib/skb.h"
+#include "lib/xdp.h"
 
 static __always_inline __u8 ipv4_get_dscp(const struct iphdr *iph)
 {
@@ -792,7 +793,194 @@ int tproxy_lan_egress(struct __sk_buff *skb)
 }
 
 SEC("tc/ingress")
-int tproxy_lan_ingress(struct __sk_buff *skb)
+int tc_tproxy_lan_ingress(struct __sk_buff *skb)
+{
+	struct ethhdr ethh;
+	struct iphdr iph;
+	struct ipv6hdr ipv6h;
+	struct icmp6hdr icmp6h;
+	struct tcphdr tcph;
+	struct udphdr udph;
+	__u8 ihl;
+	__u16 l3proto;
+	__u8 l4proto;
+	__u32 link_h_len;
+
+	if (get_link_h_len(skb->ifindex, &link_h_len))
+		return TC_ACT_OK;
+	int ret = skb_parse_transport(skb, link_h_len, &ethh, &iph, &ipv6h, &icmp6h,
+				      &tcph, &udph, &ihl, &l3proto, &l4proto);
+	if (ret) {
+		bpf_printk("skb_parse_transport: %d", ret);
+		return TC_ACT_OK;
+	}
+	if (l4proto == IPPROTO_ICMPV6)
+		return TC_ACT_OK;
+
+	// Prepare five tuples.
+	struct tuples tuples;
+
+	get_tuples(&tuples, &iph, &ipv6h, &tcph, &udph, l3proto, l4proto);
+
+	/*
+   * ip rule add fwmark 0x8000000/0x8000000 table 2023
+   * ip route add local default dev lo table 2023
+   * ip -6 rule add fwmark 0x8000000/0x8000000 table 2023
+   * ip -6 route add local default dev lo table 2023
+
+   * ip rule del fwmark 0x8000000/0x8000000 table 2023
+   * ip route del local default dev lo table 2023
+   * ip -6 rule del fwmark 0x8000000/0x8000000 table 2023
+   * ip -6 route del local default dev lo table 2023
+   */
+	// Socket lookup and assign skb to existing socket connection.
+	struct bpf_sock_tuple tuple = { 0 };
+	__u32 tuple_size;
+	struct bpf_sock *sk;
+	__u32 flag[8];
+	void *l4hdr;
+
+	if (skb->protocol == bpf_htons(ETH_P_IP)) {
+		tuple.ipv4.daddr = tuples.five.dip.u6_addr32[3];
+		tuple.ipv4.saddr = tuples.five.sip.u6_addr32[3];
+		tuple.ipv4.dport = tuples.five.dport;
+		tuple.ipv4.sport = tuples.five.sport;
+		tuple_size = sizeof(tuple.ipv4);
+	} else {
+		__builtin_memcpy(tuple.ipv6.daddr, &tuples.five.dip,
+				 IPV6_BYTE_LENGTH);
+		__builtin_memcpy(tuple.ipv6.saddr, &tuples.five.sip,
+				 IPV6_BYTE_LENGTH);
+		tuple.ipv6.dport = tuples.five.dport;
+		tuple.ipv6.sport = tuples.five.sport;
+		tuple_size = sizeof(tuple.ipv6);
+	}
+
+	if (l4proto == IPPROTO_TCP) {
+		// TCP.
+		if (tcph.syn && !tcph.ack)
+			goto new_connection;
+
+		sk = bpf_skc_lookup_tcp(skb, &tuple, tuple_size,
+					PARAM.dae_netns_id, 0);
+		if (sk) {
+			if (sk->state != BPF_TCP_LISTEN) {
+				bpf_sk_release(sk);
+				goto control_plane;
+			}
+			bpf_sk_release(sk);
+		}
+	}
+
+// Routing for new connection.
+new_connection:
+	__builtin_memset(flag, 0, sizeof(flag));
+	if (l4proto == IPPROTO_TCP) {
+		if (!(tcph.syn && !tcph.ack)) {
+			// Not a new TCP connection.
+			// Perhaps single-arm.
+			return TC_ACT_OK;
+		}
+		l4hdr = &tcph;
+		flag[0] = L4ProtoType_TCP;
+	} else {
+		l4hdr = &udph;
+		flag[0] = L4ProtoType_UDP;
+	}
+	if (skb->protocol == bpf_htons(ETH_P_IP))
+		flag[1] = IpVersionType_4;
+	else
+		flag[1] = IpVersionType_6;
+	flag[6] = tuples.dscp;
+	__be32 mac[4] = {
+		0,
+		0,
+		bpf_htonl((ethh.h_source[0] << 8) + (ethh.h_source[1])),
+		bpf_htonl((ethh.h_source[2] << 24) + (ethh.h_source[3] << 16) +
+			  (ethh.h_source[4] << 8) + (ethh.h_source[5])),
+	};
+	__s64 s64_ret;
+
+	s64_ret = route(flag, l4hdr, tuples.five.sip.u6_addr32,
+			tuples.five.dip.u6_addr32, mac);
+	if (s64_ret < 0) {
+		bpf_printk("shot routing: %d", s64_ret);
+		return TC_ACT_SHOT;
+	}
+	struct routing_result routing_result = { 0 };
+
+	routing_result.outbound = s64_ret;
+	routing_result.mark = s64_ret >> 8;
+	routing_result.must = (s64_ret >> 40) & 1;
+	routing_result.dscp = tuples.dscp;
+	__builtin_memcpy(routing_result.mac, ethh.h_source,
+			 sizeof(routing_result.mac));
+	/// NOTICE: No pid pname info for LAN packet.
+	// // Maybe this packet is also in the host (such as docker) ?
+	// // I tried and it is false.
+	//__u64 cookie = bpf_get_socket_cookie(skb);
+	//struct pid_pname *pid_pname =
+	//	bpf_map_lookup_elem(&cookie_pid_map, &cookie);
+	//if (pid_pname) {
+	//	__builtin_memcpy(routing_result.pname, pid_pname->pname,
+	//			 TASK_COMM_LEN);
+	//	routing_result.pid = pid_pname->pid;
+	//}
+
+	// Save routing result.
+	ret = bpf_map_update_elem(&routing_tuples_map, &tuples.five,
+				  &routing_result, BPF_ANY);
+	if (ret) {
+		bpf_printk("shot save routing result: %d", ret);
+		return TC_ACT_SHOT;
+	}
+#if defined(__DEBUG_ROUTING) || defined(__PRINT_ROUTING_RESULT)
+	if (l4proto == IPPROTO_TCP) {
+		bpf_printk("tcp(lan): outbound: %u, target: %pI6:%u", ret,
+			   tuples.five.dip.u6_addr32,
+			   bpf_ntohs(tuples.five.dport));
+	} else {
+		bpf_printk("udp(lan): outbound: %u, target: %pI6:%u",
+			   routing_result.outbound, tuples.five.dip.u6_addr32,
+			   bpf_ntohs(tuples.five.dport));
+	}
+#endif
+	if (routing_result.outbound == OUTBOUND_DIRECT) {
+		skb->mark = routing_result.mark;
+		goto direct;
+	} else if (unlikely(routing_result.outbound == OUTBOUND_BLOCK)) {
+		goto block;
+	}
+
+	// Check outbound connectivity in specific ipversion and l4proto.
+	struct outbound_connectivity_query q = { 0 };
+
+	q.outbound = routing_result.outbound;
+	q.ipversion = skb->protocol == bpf_htons(ETH_P_IP) ? 4 : 6;
+	q.l4proto = l4proto;
+	__u32 *alive;
+
+	alive = bpf_map_lookup_elem(&outbound_connectivity_map, &q);
+	if (alive && *alive == 0 &&
+	    !(l4proto == IPPROTO_UDP && tuples.five.dport == bpf_htons(53))) {
+		// Outbound is not alive. Dns is an exception.
+		goto block;
+	}
+
+	// Assign to control plane.
+control_plane:
+	return skb_redirect_to_control_plane(skb, link_h_len, &tuples, &ethh, &tcph,
+					     0, l3proto, l4proto);
+
+direct:
+	return TC_ACT_OK;
+
+block:
+	return TC_ACT_SHOT;
+}
+
+SEC("xdp/ingress")
+int xdp_tproxy_lan_ingress(struct __sk_buff *skb)
 {
 	struct ethhdr ethh;
 	struct iphdr iph;
