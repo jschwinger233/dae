@@ -553,7 +553,7 @@ static __always_inline int
 parse_transport(const struct __sk_buff *skb, __u32 link_h_len,
 		struct ethhdr *ethh, struct iphdr *iph, struct ipv6hdr *ipv6h,
 		struct icmp6hdr *icmp6h, struct tcphdr *tcph,
-		struct udphdr *udph, __u8 *ihl, __u8 *l4proto)
+		struct udphdr *udph, __u8 *ihl, __u16 *l3proto, __u8 *l4proto)
 {
 	__u32 offset = 0;
 	int ret;
@@ -571,6 +571,7 @@ parse_transport(const struct __sk_buff *skb, __u32 link_h_len,
 		__builtin_memset(ethh, 0, sizeof(struct ethhdr));
 		ethh->h_proto = skb->protocol;
 	}
+	*l3proto = ethh->h_proto;
 
 	*ihl = 0;
 	*l4proto = 0;
@@ -994,13 +995,14 @@ int tproxy_lan_egress(struct __sk_buff *skb)
 	struct tcphdr tcph;
 	struct udphdr udph;
 	__u8 ihl;
+	__u16 l3proto;
 	__u8 l4proto;
 	__u32 link_h_len;
 
 	if (get_link_h_len(skb->ifindex, &link_h_len))
 		return TC_ACT_OK;
 	int ret = parse_transport(skb, link_h_len, &ethh, &iph, &ipv6h, &icmp6h,
-				  &tcph, &udph, &ihl, &l4proto);
+				  &tcph, &udph, &ihl, &l3proto, &l4proto);
 	if (ret) {
 		bpf_printk("parse_transport: %d", ret);
 		return TC_ACT_OK;
@@ -1022,13 +1024,14 @@ int tproxy_lan_ingress(struct __sk_buff *skb)
 	struct tcphdr tcph;
 	struct udphdr udph;
 	__u8 ihl;
+	__u16 l3proto;
 	__u8 l4proto;
 	__u32 link_h_len;
 
 	if (get_link_h_len(skb->ifindex, &link_h_len))
 		return TC_ACT_OK;
 	int ret = parse_transport(skb, link_h_len, &ethh, &iph, &ipv6h, &icmp6h,
-				  &tcph, &udph, &ihl, &l4proto);
+				  &tcph, &udph, &ihl, &l3proto, &l4proto);
 	if (ret) {
 		bpf_printk("parse_transport: %d", ret);
 		return TC_ACT_OK;
@@ -1311,13 +1314,14 @@ int tproxy_wan_ingress(struct __sk_buff *skb)
 	struct tcphdr tcph;
 	struct udphdr udph;
 	__u8 ihl;
+	__u16 l3proto;
 	__u8 l4proto;
 	__u32 link_h_len;
 
 	if (get_link_h_len(skb->ifindex, &link_h_len))
 		return TC_ACT_OK;
 	int ret = parse_transport(skb, link_h_len, &ethh, &iph, &ipv6h, &icmp6h,
-				  &tcph, &udph, &ihl, &l4proto);
+				  &tcph, &udph, &ihl, &l3proto, &l4proto);
 	if (ret)
 		return TC_ACT_OK;
 	if (l4proto != IPPROTO_UDP)
@@ -1354,6 +1358,7 @@ int tproxy_wan_egress(struct __sk_buff *skb)
 	struct tcphdr tcph;
 	struct udphdr udph;
 	__u8 ihl;
+	__u16 l3proto;
 	__u8 l4proto;
 	__u32 link_h_len;
 
@@ -1361,7 +1366,7 @@ int tproxy_wan_egress(struct __sk_buff *skb)
 		return TC_ACT_OK;
 	bool tcp_state_syn;
 	int ret = parse_transport(skb, link_h_len, &ethh, &iph, &ipv6h, &icmp6h,
-				  &tcph, &udph, &ihl, &l4proto);
+				  &tcph, &udph, &ihl, &l3proto, &l4proto);
 	if (ret)
 		return TC_ACT_OK;
 	if (l4proto == IPPROTO_ICMPV6)
@@ -1635,11 +1640,12 @@ int tproxy_dae0_ingress(struct __sk_buff *skb)
 	struct tcphdr tcph;
 	struct udphdr udph;
 	__u8 ihl;
+	__u16 l3proto;
 	__u8 l4proto;
 	__u32 link_h_len = 14;
 
 	if (parse_transport(skb, link_h_len, &ethh, &iph, &ipv6h, &icmp6h,
-			    &tcph, &udph, &ihl, &l4proto))
+			    &tcph, &udph, &ihl, &l3proto, &l4proto))
 		return TC_ACT_OK;
 	struct tuples tuples;
 
