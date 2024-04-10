@@ -1167,6 +1167,26 @@ block:
 	return XDP_ABORTED;
 }
 
+SEC("tc/ingress_tmp")
+int tc_tproxy_lan_ingress_tmp(struct __sk_buff *skb)
+{
+	void *data = (void *)(long)skb->data;
+	struct xdp_meta *meta = (void *)(long)skb->data_meta;
+
+	if ((void *)(meta + 1) > data)
+		return TC_ACT_OK;
+
+	if (meta->goto_control_plane == 1) {
+		skb->cb[0] = TPROXY_MARK;
+		skb->cb[1] = meta->l4proto;
+		return bpf_redirect(PARAM.dae0_ifindex, 0);
+	} else if (meta->mark != 0) {
+		skb->mark = meta->mark;
+	}
+
+	return TC_ACT_OK;
+}
+
 // Cookie will change after the first packet, so we just use it for
 // handshake.
 static __always_inline bool pid_is_control_plane(struct __sk_buff *skb,
