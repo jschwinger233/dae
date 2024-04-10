@@ -284,7 +284,7 @@ func (c *controlPlaneCore) _bindLan(ifname string) error {
 	}
 	c.log.Infof("Bind to LAN: %v", ifname)
 
-	link, err := netlink.LinkByName(ifname)
+	iface, err := netlink.LinkByName(ifname)
 	if err != nil {
 		return err
 	}
@@ -297,29 +297,41 @@ func (c *controlPlaneCore) _bindLan(ifname string) error {
 	_ = c.addQdisc(ifname)
 	_ = c.mapLinkType(ifname)
 	/// Insert an elem into IfindexParamsMap.
-	ifParams, err := getIfParamsFromLink(link)
+	ifParams, err := getIfParamsFromLink(iface)
 	if err != nil {
 		return err
 	}
 	if err = ifParams.CheckVersionRequirement(c.kernelVersion); err != nil {
 		return err
 	}
-	if err := c.bpf.IfindexParamsMap.Update(uint32(link.Attrs().Index), ifParams, ebpf.UpdateAny); err != nil {
+	if err := c.bpf.IfindexParamsMap.Update(uint32(iface.Attrs().Index), ifParams, ebpf.UpdateAny); err != nil {
 		return fmt.Errorf("update IfindexIpsMap: %w", err)
 	}
+
+	l, err := link.AttachXDP(link.XDPOptions{
+		Program:   c.bpf.bpfPrograms.XdpTproxyLanIngress,
+		Interface: iface.Attrs().Index,
+		Flags:     link.XDPGenericMode,
+	})
+	if err != nil {
+		return fmt.Errorf("AttachXDP: %w", err)
+	}
+	c.deferFuncs = append(c.deferFuncs, func() error {
+		return l.Close()
+	})
 
 	// Insert filters.
 	filterIngress := &netlink.BpfFilter{
 		FilterAttrs: netlink.FilterAttrs{
-			LinkIndex: link.Attrs().Index,
+			LinkIndex: iface.Attrs().Index,
 			Parent:    netlink.HANDLE_MIN_INGRESS,
 			Handle:    netlink.MakeHandle(0x2023, 0b100+uint16(c.flip)),
 			Protocol:  unix.ETH_P_ALL,
 			// Priority should be behind of WAN's
 			Priority: 2,
 		},
-		Fd:           c.bpf.bpfPrograms.TcTproxyLanIngress.FD(),
-		Name:         consts.AppName + "_lan_ingress",
+		Fd:           c.bpf.bpfPrograms.TcTproxyLanIngressTmp.FD(),
+		Name:         consts.AppName + "_lan_ingress_tmp",
 		DirectAction: true,
 	}
 	// Remove and add.
@@ -342,7 +354,7 @@ func (c *controlPlaneCore) _bindLan(ifname string) error {
 
 	filterEgress := &netlink.BpfFilter{
 		FilterAttrs: netlink.FilterAttrs{
-			LinkIndex: link.Attrs().Index,
+			LinkIndex: iface.Attrs().Index,
 			Parent:    netlink.HANDLE_MIN_EGRESS,
 			Handle:    netlink.MakeHandle(0x2023, 0b010+uint16(c.flip)),
 			Protocol:  unix.ETH_P_ALL,
