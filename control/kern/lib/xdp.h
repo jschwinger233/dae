@@ -1,29 +1,29 @@
 struct xdp_meta {
 	__u32 mark;
-	__u8 goto_control_plane;
 	__u8 l4proto;
-	__u16 padding;
+	__u8 _pad[3];
 };
+
+const struct xdp_meta *_ __attribute__((unused));
 
 static __always_inline struct xdp_meta *
 xdp_get_meta(struct xdp_md *ctx)
 {
-	void *data = (void *)(long)ctx->data;
-	struct xdp_meta *meta = (void *)(long)ctx->data_meta;
-
-	if ((void*)(meta + 1) > data) {
-		if (bpf_xdp_adjust_meta(ctx, -(int)sizeof(struct xdp_meta)) < 0)
-			return NULL;
-
-		data = (void *)(long)ctx->data;
-		meta = (void *)(long)ctx->data_meta;
-		if ((void*)(meta + 1) > data)
-			return NULL;
-
-		__builtin_memset(meta, 0, sizeof(struct xdp_meta));
+	struct xdp_meta *meta = (void *)(long)ctx->data;
+	void *data_end = (void *)(long)ctx->data_end;
+	if ((void *)(meta + 1) > data_end) {
+		bpf_printk("xdp_get_meta failed: data_end not enough");
+		return NULL;
 	}
 
+	__builtin_memset(meta, 0, sizeof(struct xdp_meta));
 	return meta;
+}
+
+static __always_inline void
+xdp_reset_meta(struct xdp_md *ctx)
+{
+	bpf_xdp_adjust_head(ctx, (int)sizeof(struct xdp_meta));
 }
 
 static __always_inline int
@@ -207,12 +207,6 @@ xdp_redirect_to_control_plane(struct xdp_md *ctx,
 			      struct ethhdr *ethh, struct tcphdr *tcph,
 			      __u8 from_wan, __u16 l3proto, __u8 l4proto)
 {
-	__u8 dae0peer_mac[6];
-	__builtin_memcpy(dae0peer_mac, (void *)&PARAM.dae0peer_mac,
-			 sizeof(dae0peer_mac));
-	bpf_xdp_store_bytes(ctx, offsetof(struct ethhdr, h_dest),
-			    (void *)dae0peer_mac, sizeof(ethh->h_dest));
-
 	struct redirect_tuple redirect_tuple = {};
 
 	if (l3proto == bpf_htons(ETH_P_IP)) {
@@ -238,12 +232,15 @@ xdp_redirect_to_control_plane(struct xdp_md *ctx,
 
 	struct xdp_meta *meta = xdp_get_meta(ctx);
 
-	if (!meta)
-		return XDP_ABORTED;
+	if (!meta) {
+		bpf_printk("xdp_get_meta failed");
+		return XDP_DROP; // TODO@gray: XDP_DROP
+	}
 
-	meta->goto_control_plane = 1;
+	bpf_printk("meta=%llx\n", (void *)meta);
+	meta->mark = TPROXY_MARK;
 	if ((l4proto == IPPROTO_TCP && tcph->syn) || l4proto == IPPROTO_UDP)
 		meta->l4proto = l4proto;
 
-	return XDP_PASS;
+	return bpf_redirect(PARAM.dae0_ifindex, 0);
 }

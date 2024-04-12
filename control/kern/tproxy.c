@@ -1167,23 +1167,39 @@ block:
 	return XDP_ABORTED;
 }
 
-SEC("tc/ingress_tmp")
-int tc_tproxy_lan_ingress_tmp(struct __sk_buff *skb)
-{
-	void *data = (void *)(long)skb->data;
-	struct xdp_meta *meta = (void *)(long)skb->data_meta;
+//SEC("tc/ingress_tmp")
+//int tc_tproxy_lan_ingress_tmp(struct __sk_buff *skb)
+//{
+//	void *data_end = (void *)(long)skb->data_end;
+//	struct xdp_meta *meta = (void *)(long)skb->data;
+//
+//	if ((void *)(meta + 1) > data_end)
+//		return TC_ACT_OK;
+//
+//	if (meta->goto_control_plane == 1) {
+//		skb->cb[0] = TPROXY_MARK;
+//		skb->cb[1] = meta->l4proto;
+//		return bpf_redirect(PARAM.dae0_ifindex, 0);
+//	} else if (meta->mark != 0) {
+//		skb->mark = meta->mark;
+//	}
+//
+//	return TC_ACT_OK;
+//}
 
-	if ((void *)(meta + 1) > data)
+SEC("tc/dae0_egress")
+int tproxy_dae0_egress(struct __sk_buff *skb)
+{
+	void *data_end = (void *)(long)skb->data_end;
+	struct xdp_meta *meta = (void *)(long)skb->data;
+
+	if ((void *)(meta + 1) > data_end)
 		return TC_ACT_OK;
 
-	if (meta->goto_control_plane == 1) {
-		skb->cb[0] = TPROXY_MARK;
+	if (meta->mark == TPROXY_MARK) {
+		skb->cb[0] = meta->mark;
 		skb->cb[1] = meta->l4proto;
-		return bpf_redirect(PARAM.dae0_ifindex, 0);
-	} else if (meta->mark != 0) {
-		skb->mark = meta->mark;
 	}
-
 	return TC_ACT_OK;
 }
 
@@ -1594,7 +1610,12 @@ int tproxy_dae0peer_ingress(struct __sk_buff *skb)
 {
 	/* Only packets redirected from wan_egress or lan_ingress have this cb mark.
    */
-	if (skb->cb[0] != TPROXY_MARK)
+	struct xdp_meta *meta = (void *)(long)skb->data;
+	void *data_end = (void *)(long)skb->data_end;
+	if ((void *)(meta + 1) > data_end)
+		return TC_ACT_OK;
+
+	if (meta->mark != TPROXY_MARK)
 		return TC_ACT_SHOT;
 
 	/* ip rule add fwmark 0x8000000/0x8000000 table 2023
@@ -1607,7 +1628,7 @@ int tproxy_dae0peer_ingress(struct __sk_buff *skb)
    * established TCP, kernel can take care of socket lookup, so just
    * return them to stack without calling bpf_sk_assign.
    */
-	__u8 l4proto = skb->cb[1];
+	__u8 l4proto = meta->l4proto;
 
 	if (l4proto != 0)
 		assign_listener(skb, l4proto);
