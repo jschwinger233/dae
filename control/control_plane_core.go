@@ -284,7 +284,7 @@ func (c *controlPlaneCore) _bindLan(ifname string) error {
 	}
 	c.log.Infof("Bind to LAN: %v", ifname)
 
-	link, err := netlink.LinkByName(ifname)
+	iface, err := netlink.LinkByName(ifname)
 	if err != nil {
 		return err
 	}
@@ -297,78 +297,26 @@ func (c *controlPlaneCore) _bindLan(ifname string) error {
 	_ = c.addQdisc(ifname)
 	_ = c.mapLinkType(ifname)
 	/// Insert an elem into IfindexParamsMap.
-	ifParams, err := getIfParamsFromLink(link)
+	ifParams, err := getIfParamsFromLink(iface)
 	if err != nil {
 		return err
 	}
 	if err = ifParams.CheckVersionRequirement(c.kernelVersion); err != nil {
 		return err
 	}
-	if err := c.bpf.IfindexParamsMap.Update(uint32(link.Attrs().Index), ifParams, ebpf.UpdateAny); err != nil {
+	if err := c.bpf.IfindexParamsMap.Update(uint32(iface.Attrs().Index), ifParams, ebpf.UpdateAny); err != nil {
 		return fmt.Errorf("update IfindexIpsMap: %w", err)
 	}
 
-	// Insert filters.
-	filterIngress := &netlink.BpfFilter{
-		FilterAttrs: netlink.FilterAttrs{
-			LinkIndex: link.Attrs().Index,
-			Parent:    netlink.HANDLE_MIN_INGRESS,
-			Handle:    netlink.MakeHandle(0x2023, 0b100+uint16(c.flip)),
-			Protocol:  unix.ETH_P_ALL,
-			// Priority should be behind of WAN's
-			Priority: 2,
-		},
-		Fd:           c.bpf.bpfPrograms.TproxyLanIngress.FD(),
-		Name:         consts.AppName + "_lan_ingress",
-		DirectAction: true,
-	}
-	// Remove and add.
-	_ = netlink.FilterDel(filterIngress)
-	if !c.isReload {
-		// Clean up thoroughly.
-		filterIngressFlipped := deepcopy.Copy(filterIngress).(*netlink.BpfFilter)
-		filterIngressFlipped.FilterAttrs.Handle ^= 1
-		_ = netlink.FilterDel(filterIngressFlipped)
-	}
-	if err := netlink.FilterAdd(filterIngress); err != nil {
-		return fmt.Errorf("cannot attach ebpf object to filter ingress: %w", err)
-	}
-	c.deferFuncs = append(c.deferFuncs, func() error {
-		if err := netlink.FilterDel(filterIngress); err != nil {
-			return fmt.Errorf("FilterDel(%v:%v): %w", ifname, filterIngress.Name, err)
-		}
-		return nil
+	l, err := link.AttachXDP(link.XDPOptions{
+		Program:   c.bpf.bpfPrograms.XdpTproxyLanIngress,
+		Interface: iface.Attrs().Index,
 	})
-
-	filterEgress := &netlink.BpfFilter{
-		FilterAttrs: netlink.FilterAttrs{
-			LinkIndex: link.Attrs().Index,
-			Parent:    netlink.HANDLE_MIN_EGRESS,
-			Handle:    netlink.MakeHandle(0x2023, 0b010+uint16(c.flip)),
-			Protocol:  unix.ETH_P_ALL,
-			// Priority should be front of WAN's
-			Priority: 1,
-		},
-		Fd:           c.bpf.bpfPrograms.TproxyLanEgress.FD(),
-		Name:         consts.AppName + "_lan_egress",
-		DirectAction: true,
-	}
-	// Remove and add.
-	_ = netlink.FilterDel(filterEgress)
-	if !c.isReload {
-		// Clean up thoroughly.
-		filterEgressFlipped := deepcopy.Copy(filterEgress).(*netlink.BpfFilter)
-		filterEgressFlipped.FilterAttrs.Handle ^= 1
-		_ = netlink.FilterDel(filterEgressFlipped)
-	}
-	if err := netlink.FilterAdd(filterEgress); err != nil {
-		return fmt.Errorf("cannot attach ebpf object to filter egress: %w", err)
+	if err != nil {
+		return fmt.Errorf("AttachXDP: %w", err)
 	}
 	c.deferFuncs = append(c.deferFuncs, func() error {
-		if err := netlink.FilterDel(filterEgress); err != nil {
-			return fmt.Errorf("FilterDel(%v:%v): %w", ifname, filterEgress.Name, err)
-		}
-		return nil
+		return l.Close()
 	})
 
 	return nil
@@ -615,6 +563,37 @@ func (c *controlPlaneCore) bindDaens() (err error) {
 		}
 		return nil
 	})
+
+	//filterDae0Egress := &netlink.BpfFilter{
+	//	FilterAttrs: netlink.FilterAttrs{
+	//		LinkIndex: daens.Dae0().Attrs().Index,
+	//		Parent:    netlink.HANDLE_MIN_EGRESS,
+	//		Handle:    netlink.MakeHandle(0x2023, 0b100+uint16(c.flip)),
+	//		Protocol:  unix.ETH_P_ALL,
+	//		Priority:  2,
+	//	},
+	//	Fd:           c.bpf.bpfPrograms.TproxyDae0Egress.FD(),
+	//	Name:         consts.AppName + "_dae0_egress",
+	//	DirectAction: true,
+	//}
+	//_ = netlink.FilterDel(filterDae0Egress)
+	//// Remove and add.
+	//if !c.isReload {
+	//	// Clean up thoroughly.
+	//	filterEgressFlipped := deepcopy.Copy(filterDae0Egress).(*netlink.BpfFilter)
+	//	filterEgressFlipped.FilterAttrs.Handle ^= 1
+	//	_ = netlink.FilterDel(filterEgressFlipped)
+	//}
+	//if err := netlink.FilterAdd(filterDae0Egress); err != nil {
+	//	return fmt.Errorf("cannot attach ebpf object to filter egress: %w", err)
+	//}
+	//c.deferFuncs = append(c.deferFuncs, func() error {
+	//	if err := netlink.FilterDel(filterDae0Egress); err != nil && !os.IsNotExist(err) {
+	//		return fmt.Errorf("FilterDel(%v:%v): %w", "dae0", filterDae0Egress.Name, err)
+	//	}
+	//	return nil
+	//})
+
 	return
 }
 
