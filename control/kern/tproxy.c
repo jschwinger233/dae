@@ -171,6 +171,12 @@ struct tuples {
 	__u8 dscp;
 };
 
+struct redirect_meta {
+	__u32 mark;
+	__u8 l4proto;
+	__u8 pad[3];
+};
+
 struct dae_param {
 	__u32 tproxy_port;
 	__u32 control_plane_pid;
@@ -950,10 +956,6 @@ redirect_to_control_plane(struct __sk_buff *skb, __u32 link_h_len,
 				    &l3proto, sizeof(l3proto), 0);
 	}
 
-	bpf_skb_store_bytes(skb, offsetof(struct ethhdr, h_dest),
-			    (void *)&PARAM.dae0peer_mac, sizeof(ethh->h_dest),
-			    0);
-
 	struct redirect_tuple redirect_tuple = {};
 
 	if (l3proto == bpf_htons(ETH_P_IP)) {
@@ -977,10 +979,14 @@ redirect_to_control_plane(struct __sk_buff *skb, __u32 link_h_len,
 	bpf_map_update_elem(&redirect_track, &redirect_tuple, &redirect_entry,
 			    BPF_ANY);
 
-	skb->cb[0] = TPROXY_MARK;
-	skb->cb[1] = 0;
+	struct redirect_meta *meta = (void *)(long)skb->data;
+	if ((void *)(meta + 1) > (void *)(long)skb->data_end)
+		return TC_ACT_SHOT;
+
+	__builtin_memset(meta, 0, sizeof(*meta));
+	meta->mark = TPROXY_MARK;
 	if ((l4proto == IPPROTO_TCP && tcph->syn) || l4proto == IPPROTO_UDP)
-		skb->cb[1] = l4proto;
+		meta->l4proto = l4proto;
 
 	return bpf_redirect(PARAM.dae0_ifindex, 0);
 }
@@ -1609,9 +1615,14 @@ int tproxy_wan_egress(struct __sk_buff *skb)
 SEC("tc/dae0peer_ingress")
 int tproxy_dae0peer_ingress(struct __sk_buff *skb)
 {
-	/* Only packets redirected from wan_egress or lan_ingress have this cb mark.
+	/* Only packets redirected from wan_egress or lan_ingress have this mark.
    */
-	if (skb->cb[0] != TPROXY_MARK)
+	struct redirect_meta *meta = (void *)(long)skb->data;
+
+	if ((void *)(meta + 1) > (void *)(long)skb->data_end)
+		return TC_ACT_SHOT;
+
+	if (meta->mark != TPROXY_MARK)
 		return TC_ACT_SHOT;
 
 	/* ip rule add fwmark 0x8000000/0x8000000 table 2023
@@ -1620,11 +1631,11 @@ int tproxy_dae0peer_ingress(struct __sk_buff *skb)
 	skb->mark = TPROXY_MARK;
 	bpf_skb_change_type(skb, PACKET_HOST);
 
-	/* l4proto is stored in skb->cb[1] only for UDP and new TCP. As for
+	/* l4proto is stored in meta only for UDP and new TCP. As for
    * established TCP, kernel can take care of socket lookup, so just
    * return them to stack without calling bpf_sk_assign.
    */
-	__u8 l4proto = skb->cb[1];
+	__u8 l4proto = meta->l4proto;
 
 	if (l4proto != 0)
 		assign_listener(skb, l4proto);
