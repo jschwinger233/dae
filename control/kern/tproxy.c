@@ -408,6 +408,7 @@ struct {
 
 // Functions:
 #include "lib/skb.h"
+#include "lib/xdp.h"
 
 static __always_inline __u8 ipv4_get_dscp(const struct iphdr *iph)
 {

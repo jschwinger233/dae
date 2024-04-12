@@ -1,5 +1,5 @@
 static __always_inline int
-skb_handle_ipv6_extensions(const struct __sk_buff *skb, __u32 offset, __u32 hdr,
+xdp_handle_ipv6_extensions(struct xdp_md *ctx, __u32 offset, __u32 hdr,
 			   struct icmp6hdr *icmp6h, struct tcphdr *tcph,
 			   struct udphdr *udph, __u8 *ihl, __u8 *l4proto)
 {
@@ -26,7 +26,7 @@ skb_handle_ipv6_extensions(const struct __sk_buff *skb, __u32 offset, __u32 hdr,
 			*l4proto = hdr;
 			hdr_length = sizeof(struct icmp6hdr);
 			// Assume ICMPV6 as a level 4 protocol.
-			ret = bpf_skb_load_bytes(skb, offset, icmp6h,
+			ret = bpf_xdp_load_bytes(ctx, offset, icmp6h,
 						 hdr_length);
 			if (ret) {
 				bpf_printk("not a valid IPv6 packet");
@@ -36,7 +36,7 @@ skb_handle_ipv6_extensions(const struct __sk_buff *skb, __u32 offset, __u32 hdr,
 
 		case IPPROTO_HOPOPTS:
 		case IPPROTO_ROUTING:
-			ret = bpf_skb_load_bytes(skb, offset + 1, &hdr_length,
+			ret = bpf_xdp_load_bytes(ctx, offset + 1, &hdr_length,
 						 sizeof(hdr_length));
 			if (ret) {
 				bpf_printk("not a valid IPv6 packet");
@@ -44,7 +44,7 @@ skb_handle_ipv6_extensions(const struct __sk_buff *skb, __u32 offset, __u32 hdr,
 			}
 
 special_n1:
-			ret = bpf_skb_load_bytes(skb, offset, &nexthdr,
+			ret = bpf_xdp_load_bytes(ctx, offset, &nexthdr,
 						 sizeof(nexthdr));
 			if (ret) {
 				bpf_printk("not a valid IPv6 packet");
@@ -59,7 +59,7 @@ special_n1:
 			*l4proto = hdr;
 			if (hdr == IPPROTO_TCP) {
 				// Upper layer;
-				ret = bpf_skb_load_bytes(skb, offset, tcph,
+				ret = bpf_xdp_load_bytes(ctx, offset, tcph,
 							 sizeof(struct tcphdr));
 				if (ret) {
 					bpf_printk("not a valid IPv6 packet");
@@ -67,7 +67,7 @@ special_n1:
 				}
 			} else if (hdr == IPPROTO_UDP) {
 				// Upper layer;
-				ret = bpf_skb_load_bytes(skb, offset, udph,
+				ret = bpf_xdp_load_bytes(ctx, offset, udph,
 							 sizeof(struct udphdr));
 				if (ret) {
 					bpf_printk("not a valid IPv6 packet");
@@ -90,7 +90,7 @@ special_n1:
 }
 
 static __always_inline int
-skb_parse_transport(const struct __sk_buff *skb, __u32 link_h_len,
+xdp_parse_transport(struct xdp_md *ctx,
 		    struct ethhdr *ethh, struct iphdr *iph, struct ipv6hdr *ipv6h,
 		    struct icmp6hdr *icmp6h, struct tcphdr *tcph,
 		    struct udphdr *udph, __u8 *ihl, __u16 *l3proto, __u8 *l4proto)
@@ -98,19 +98,14 @@ skb_parse_transport(const struct __sk_buff *skb, __u32 link_h_len,
 	__u32 offset = 0;
 	int ret;
 
-	if (link_h_len == ETH_HLEN) {
-		ret = bpf_skb_load_bytes(skb, offset, ethh,
-					 sizeof(struct ethhdr));
-		if (ret) {
-			bpf_printk("not ethernet packet");
-			return 1;
-		}
-		// Skip ethhdr for next hdr.
-		offset += sizeof(struct ethhdr);
-	} else {
-		__builtin_memset(ethh, 0, sizeof(struct ethhdr));
-		ethh->h_proto = skb->protocol;
+	ret = bpf_xdp_load_bytes(ctx, offset, ethh,
+				 sizeof(struct ethhdr));
+	if (ret) {
+		bpf_printk("not ethernet packet");
+		return 1;
 	}
+	// Skip ethhdr for next hdr.
+	offset += sizeof(struct ethhdr);
 	*l3proto = ethh->h_proto;
 
 	*ihl = 0;
@@ -125,7 +120,7 @@ skb_parse_transport(const struct __sk_buff *skb, __u32 link_h_len,
 	//						bpf_htons(ETH_P_IP),
 	// bpf_htons(ETH_P_IPV6));
 	if (ethh->h_proto == bpf_htons(ETH_P_IP)) {
-		ret = bpf_skb_load_bytes(skb, offset, iph,
+		ret = bpf_xdp_load_bytes(ctx, offset, iph,
 					 sizeof(struct iphdr));
 		if (ret)
 			return -EFAULT;
@@ -136,7 +131,7 @@ skb_parse_transport(const struct __sk_buff *skb, __u32 link_h_len,
 		*l4proto = iph->protocol;
 		switch (iph->protocol) {
 		case IPPROTO_TCP: {
-			ret = bpf_skb_load_bytes(skb, offset, tcph,
+			ret = bpf_xdp_load_bytes(ctx, offset, tcph,
 						 sizeof(struct tcphdr));
 			if (ret) {
 				// Not a complete tcphdr.
@@ -144,7 +139,7 @@ skb_parse_transport(const struct __sk_buff *skb, __u32 link_h_len,
 			}
 		} break;
 		case IPPROTO_UDP: {
-			ret = bpf_skb_load_bytes(skb, offset, udph,
+			ret = bpf_xdp_load_bytes(ctx, offset, udph,
 						 sizeof(struct udphdr));
 			if (ret) {
 				// Not a complete udphdr.
@@ -157,7 +152,7 @@ skb_parse_transport(const struct __sk_buff *skb, __u32 link_h_len,
 		*ihl = iph->ihl;
 		return 0;
 	} else if (ethh->h_proto == bpf_htons(ETH_P_IPV6)) {
-		ret = bpf_skb_load_bytes(skb, offset, ipv6h,
+		ret = bpf_xdp_load_bytes(ctx, offset, ipv6h,
 					 sizeof(struct ipv6hdr));
 		if (ret) {
 			bpf_printk("not a valid IPv6 packet");
@@ -166,30 +161,23 @@ skb_parse_transport(const struct __sk_buff *skb, __u32 link_h_len,
 
 		offset += sizeof(struct ipv6hdr);
 
-		return skb_handle_ipv6_extensions(skb, offset, ipv6h->nexthdr,
+		return xdp_handle_ipv6_extensions(ctx, offset, ipv6h->nexthdr,
 						  icmp6h, tcph, udph, ihl, l4proto);
 	} else {
 		/// EXPECTED: Maybe ICMP, MPLS, etc.
 		// bpf_printk("IP but not supported packet: protocol is %u",
 		// iph->protocol);
-		// bpf_printk("unknown link proto: %u", bpf_ntohl(skb->protocol));
+		// bpf_printk("unknown link proto: %u", bpf_ntohl(ctx->protocol));
 		return 1;
 	}
 }
 
 static __always_inline int
-skb_redirect_to_control_plane(struct __sk_buff *skb, __u32 link_h_len,
+xdp_redirect_to_control_plane(struct xdp_md *ctx,
 			      struct tuples *tuples,
 			      struct ethhdr *ethh, struct tcphdr *tcph,
 			      __u8 from_wan, __u16 l3proto, __u8 l4proto)
 {
-	/* Redirect from L3 dev to L2 dev, e.g. wg0 -> veth */
-	if (!link_h_len) {
-		bpf_skb_change_head(skb, sizeof(struct ethhdr), 0);
-		bpf_skb_store_bytes(skb, offsetof(struct ethhdr, h_proto),
-				    &l3proto, sizeof(l3proto), 0);
-	}
-
 	struct redirect_tuple redirect_tuple = {};
 
 	if (l3proto == bpf_htons(ETH_P_IP)) {
@@ -204,7 +192,7 @@ skb_redirect_to_control_plane(struct __sk_buff *skb, __u32 link_h_len,
 	redirect_tuple.l4proto = l4proto;
 	struct redirect_entry redirect_entry = {};
 
-	redirect_entry.ifindex = skb->ifindex;
+	redirect_entry.ifindex = ctx->ingress_ifindex;
 	redirect_entry.from_wan = from_wan;
 	__builtin_memcpy(redirect_entry.smac, ethh->h_source,
 			 sizeof(ethh->h_source));
@@ -213,9 +201,9 @@ skb_redirect_to_control_plane(struct __sk_buff *skb, __u32 link_h_len,
 	bpf_map_update_elem(&redirect_track, &redirect_tuple, &redirect_entry,
 			    BPF_ANY);
 
-	struct redirect_meta *meta = (void *)(long)skb->data;
-	if ((void *)(meta + 1) > (void *)(long)skb->data_end)
-		return TC_ACT_SHOT;
+	struct redirect_meta *meta = (void *)(long)ctx->data;
+	if ((void *)(meta + 1) > (void *)(long)ctx->data_end)
+		return XDP_DROP;
 
 	__builtin_memset(meta, 0, sizeof(*meta));
 	meta->mark = TPROXY_MARK;
