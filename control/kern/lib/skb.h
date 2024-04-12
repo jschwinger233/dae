@@ -1,0 +1,226 @@
+static __always_inline int
+handle_ipv6_extensions(const struct __sk_buff *skb, __u32 offset, __u32 hdr,
+		       struct icmp6hdr *icmp6h, struct tcphdr *tcph,
+		       struct udphdr *udph, __u8 *ihl, __u8 *l4proto)
+{
+	__u8 hdr_length = 0;
+	__u8 nexthdr = 0;
+	*ihl = sizeof(struct ipv6hdr) / 4;
+	int ret;
+	// We only process TCP and UDP traffic.
+
+	// Unroll can give less instructions but more memory consumption when loading.
+	// We disable it here to support more poor memory devices.
+	// #pragma unroll
+	for (int i = 0; i < IPV6_MAX_EXTENSIONS;
+	     i++, offset += hdr_length, hdr = nexthdr, *ihl += hdr_length / 4) {
+		if (hdr_length % 4) {
+			bpf_printk(
+				"IPv6 extension length is not multiples of 4");
+			return 1;
+		}
+		// See control/control_plane.go.
+
+		switch (hdr) {
+		case IPPROTO_ICMPV6:
+			*l4proto = hdr;
+			hdr_length = sizeof(struct icmp6hdr);
+			// Assume ICMPV6 as a level 4 protocol.
+			ret = bpf_skb_load_bytes(skb, offset, icmp6h,
+						 hdr_length);
+			if (ret) {
+				bpf_printk("not a valid IPv6 packet");
+				return -EFAULT;
+			}
+			return 0;
+
+		case IPPROTO_HOPOPTS:
+		case IPPROTO_ROUTING:
+			ret = bpf_skb_load_bytes(skb, offset + 1, &hdr_length,
+						 sizeof(hdr_length));
+			if (ret) {
+				bpf_printk("not a valid IPv6 packet");
+				return -EFAULT;
+			}
+
+special_n1:
+			ret = bpf_skb_load_bytes(skb, offset, &nexthdr,
+						 sizeof(nexthdr));
+			if (ret) {
+				bpf_printk("not a valid IPv6 packet");
+				return -EFAULT;
+			}
+			break;
+		case IPPROTO_FRAGMENT:
+			hdr_length = 4;
+			goto special_n1;
+		case IPPROTO_TCP:
+		case IPPROTO_UDP:
+			*l4proto = hdr;
+			if (hdr == IPPROTO_TCP) {
+				// Upper layer;
+				ret = bpf_skb_load_bytes(skb, offset, tcph,
+							 sizeof(struct tcphdr));
+				if (ret) {
+					bpf_printk("not a valid IPv6 packet");
+					return -EFAULT;
+				}
+			} else if (hdr == IPPROTO_UDP) {
+				// Upper layer;
+				ret = bpf_skb_load_bytes(skb, offset, udph,
+							 sizeof(struct udphdr));
+				if (ret) {
+					bpf_printk("not a valid IPv6 packet");
+					return -EFAULT;
+				}
+			} else {
+				// Unknown hdr.
+				bpf_printk("Unexpected hdr.");
+				return 1;
+			}
+			return 0;
+		default:
+			/// EXPECTED: Maybe ICMP, etc.
+			// bpf_printk("IPv6 but unrecognized extension protocol: %u", hdr);
+			return 1;
+		}
+	}
+	bpf_printk("exceeds IPV6_MAX_EXTENSIONS limit");
+	return 1;
+}
+
+static __always_inline int
+parse_transport(const struct __sk_buff *skb, __u32 link_h_len,
+		struct ethhdr *ethh, struct iphdr *iph, struct ipv6hdr *ipv6h,
+		struct icmp6hdr *icmp6h, struct tcphdr *tcph,
+		struct udphdr *udph, __u8 *ihl, __u16 *l3proto, __u8 *l4proto)
+{
+	__u32 offset = 0;
+	int ret;
+
+	if (link_h_len == ETH_HLEN) {
+		ret = bpf_skb_load_bytes(skb, offset, ethh,
+					 sizeof(struct ethhdr));
+		if (ret) {
+			bpf_printk("not ethernet packet");
+			return 1;
+		}
+		// Skip ethhdr for next hdr.
+		offset += sizeof(struct ethhdr);
+	} else {
+		__builtin_memset(ethh, 0, sizeof(struct ethhdr));
+		ethh->h_proto = skb->protocol;
+	}
+	*l3proto = ethh->h_proto;
+
+	*ihl = 0;
+	*l4proto = 0;
+	__builtin_memset(iph, 0, sizeof(struct iphdr));
+	__builtin_memset(ipv6h, 0, sizeof(struct ipv6hdr));
+	__builtin_memset(icmp6h, 0, sizeof(struct icmp6hdr));
+	__builtin_memset(tcph, 0, sizeof(struct tcphdr));
+	__builtin_memset(udph, 0, sizeof(struct udphdr));
+
+	// bpf_printk("parse_transport: h_proto: %u ? %u %u", ethh->h_proto,
+	//						bpf_htons(ETH_P_IP),
+	// bpf_htons(ETH_P_IPV6));
+	if (ethh->h_proto == bpf_htons(ETH_P_IP)) {
+		ret = bpf_skb_load_bytes(skb, offset, iph,
+					 sizeof(struct iphdr));
+		if (ret)
+			return -EFAULT;
+		// Skip ipv4hdr and options for next hdr.
+		offset += iph->ihl * 4;
+
+		// We only process TCP and UDP traffic.
+		*l4proto = iph->protocol;
+		switch (iph->protocol) {
+		case IPPROTO_TCP: {
+			ret = bpf_skb_load_bytes(skb, offset, tcph,
+						 sizeof(struct tcphdr));
+			if (ret) {
+				// Not a complete tcphdr.
+				return -EFAULT;
+			}
+		} break;
+		case IPPROTO_UDP: {
+			ret = bpf_skb_load_bytes(skb, offset, udph,
+						 sizeof(struct udphdr));
+			if (ret) {
+				// Not a complete udphdr.
+				return -EFAULT;
+			}
+		} break;
+		default:
+			return 1;
+		}
+		*ihl = iph->ihl;
+		return 0;
+	} else if (ethh->h_proto == bpf_htons(ETH_P_IPV6)) {
+		ret = bpf_skb_load_bytes(skb, offset, ipv6h,
+					 sizeof(struct ipv6hdr));
+		if (ret) {
+			bpf_printk("not a valid IPv6 packet");
+			return -EFAULT;
+		}
+
+		offset += sizeof(struct ipv6hdr);
+
+		return handle_ipv6_extensions(skb, offset, ipv6h->nexthdr,
+					      icmp6h, tcph, udph, ihl, l4proto);
+	} else {
+		/// EXPECTED: Maybe ICMP, MPLS, etc.
+		// bpf_printk("IP but not supported packet: protocol is %u",
+		// iph->protocol);
+		// bpf_printk("unknown link proto: %u", bpf_ntohl(skb->protocol));
+		return 1;
+	}
+}
+
+static __always_inline int
+redirect_to_control_plane(struct __sk_buff *skb, __u32 link_h_len,
+			  struct tuples *tuples,
+			  struct ethhdr *ethh, struct tcphdr *tcph,
+			  __u8 from_wan, __u16 l3proto, __u8 l4proto)
+{
+	/* Redirect from L3 dev to L2 dev, e.g. wg0 -> veth */
+	if (!link_h_len) {
+		bpf_skb_change_head(skb, sizeof(struct ethhdr), 0);
+		bpf_skb_store_bytes(skb, offsetof(struct ethhdr, h_proto),
+				    &l3proto, sizeof(l3proto), 0);
+	}
+
+	struct redirect_tuple redirect_tuple = {};
+
+	if (l3proto == bpf_htons(ETH_P_IP)) {
+		redirect_tuple.sip.u6_addr32[3] = tuples->five.sip.u6_addr32[3];
+		redirect_tuple.dip.u6_addr32[3] = tuples->five.dip.u6_addr32[3];
+	} else {
+		__builtin_memcpy(&redirect_tuple.sip, &tuples->five.sip,
+				 IPV6_BYTE_LENGTH);
+		__builtin_memcpy(&redirect_tuple.dip, &tuples->five.dip,
+				 IPV6_BYTE_LENGTH);
+	}
+	redirect_tuple.l4proto = l4proto;
+	struct redirect_entry redirect_entry = {};
+
+	redirect_entry.ifindex = skb->ifindex;
+	redirect_entry.from_wan = from_wan;
+	__builtin_memcpy(redirect_entry.smac, ethh->h_source,
+			 sizeof(ethh->h_source));
+	__builtin_memcpy(redirect_entry.dmac, ethh->h_dest,
+			 sizeof(ethh->h_dest));
+	bpf_map_update_elem(&redirect_track, &redirect_tuple, &redirect_entry,
+			    BPF_ANY);
+
+	struct redirect_meta *meta = (void *)(long)skb->data;
+	if ((void *)(meta + 1) > (void *)(long)skb->data_end)
+		return TC_ACT_SHOT;
+
+	__builtin_memset(meta, 0, sizeof(*meta));
+	meta->mark = TPROXY_MARK;
+	if ((l4proto == IPPROTO_TCP && tcph->syn) || l4proto == IPPROTO_UDP)
+		meta->l4proto = l4proto;
+
+	return bpf_redirect(PARAM.dae0_ifindex, 0);
+}
