@@ -17,7 +17,7 @@
 // #define __DEBUG_ROUTING
 // #define __PRINT_ROUTING_RESULT
 // #define __PRINT_SETUP_PROCESS_CONNNECTION
-// #define __DEBUG
+#define __DEBUG
 // #define __UNROLL_ROUTE_LOOP
 
 #ifndef __DEBUG
@@ -72,7 +72,9 @@
 #define IS_WAN 0
 #define IS_LAN 1
 
-#define TPROXY_MARK 0x8000000
+#define TPROXY_MARK    0x08000000
+#define TPROXY_MASK    0xFF000000
+#define L4PROTO_MASK   0x000000FF
 #define RECOGNIZE 0x2017
 
 #define ESOCKTNOSUPPORT 94 /* Socket type not supported */
@@ -91,7 +93,7 @@ enum {
 
 // Param keys:
 static const __u32 zero_key;
-static const __u32 one_key = 1;
+//static const __u32 one_key = 1;
 
 // Outbound Connectivity Map:
 
@@ -920,15 +922,12 @@ static __always_inline int assign_listener(struct __sk_buff *skb, __u8 l4proto)
 {
 	struct bpf_sock *sk;
 
-	if (l4proto == IPPROTO_TCP)
-		sk = bpf_map_lookup_elem(&listen_socket_map, &zero_key);
-	else
-		sk = bpf_map_lookup_elem(&listen_socket_map, &one_key);
-
+	sk = bpf_map_lookup_elem(&listen_socket_map, &zero_key);
 	if (!sk)
 		return -1;
 
 	int ret = bpf_sk_assign(skb, sk, 0);
+	bpf_printk("assign_listener: sk=%llx ret=%d\n", sk, ret);
 
 	bpf_sk_release(sk);
 	return ret;
@@ -973,10 +972,9 @@ static __always_inline void prep_redirect_to_control_plane(
 	bpf_map_update_elem(&redirect_track, &redirect_tuple, &redirect_entry,
 			    BPF_ANY);
 
-	skb->cb[0] = TPROXY_MARK;
-	skb->cb[1] = 0;
+	skb->mark = TPROXY_MARK;
 	if ((l4proto == IPPROTO_TCP && tcph->syn) || l4proto == IPPROTO_UDP)
-		skb->cb[1] = l4proto;
+		skb->mark |= l4proto;
 }
 
 SEC("tc/egress")
@@ -1188,7 +1186,7 @@ new_connection:
 control_plane:
 	prep_redirect_to_control_plane(skb, link_h_len, &tuples, l4proto, &ethh,
 				       0, &tcph);
-	return bpf_redirect(PARAM.dae0_ifindex, 0);
+	return bpf_redirect_peer(PARAM.dae0_ifindex, 0);
 
 direct:
 	return TC_ACT_OK;
@@ -1315,6 +1313,9 @@ int tproxy_wan_ingress(struct __sk_buff *skb)
 	__u8 ihl;
 	__u8 l4proto;
 	__u32 link_h_len;
+
+       if ((skb->mark & TPROXY_MASK) == TPROXY_MARK)
+               return bpf_redirect_peer(PARAM.dae0_ifindex, 0);
 
 	if (get_link_h_len(skb->ifindex, &link_h_len))
 		return TC_ACT_OK;
@@ -1604,7 +1605,7 @@ int tproxy_wan_egress(struct __sk_buff *skb)
 
 	prep_redirect_to_control_plane(skb, link_h_len, &tuples, l4proto, &ethh,
 				       1, &tcph);
-	return bpf_redirect(PARAM.dae0_ifindex, 0);
+	return bpf_redirect(skb->ifindex, BPF_F_INGRESS);
 }
 
 SEC("tc/dae0peer_ingress")
@@ -1612,7 +1613,7 @@ int tproxy_dae0peer_ingress(struct __sk_buff *skb)
 {
 	/* Only packets redirected from wan_egress or lan_ingress have this cb mark.
    */
-	if (skb->cb[0] != TPROXY_MARK)
+	if ((skb->mark & TPROXY_MASK) != TPROXY_MARK)
 		return TC_ACT_SHOT;
 
 	/* ip rule add fwmark 0x8000000/0x8000000 table 2023
@@ -1625,10 +1626,10 @@ int tproxy_dae0peer_ingress(struct __sk_buff *skb)
    * established TCP, kernel can take care of socket lookup, so just
    * return them to stack without calling bpf_sk_assign.
    */
-	__u8 l4proto = skb->cb[1];
+//__u8 l4proto = (__u8)skb->mark & L4PROTO_MASK;
+       //if (l4proto != 0)
+       assign_listener(skb, IPPROTO_TCP);
 
-	if (l4proto != 0)
-		assign_listener(skb, l4proto);
 	return TC_ACT_OK;
 }
 
