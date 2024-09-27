@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/vishvananda/netlink/nl"
@@ -26,7 +27,7 @@ type programSet struct {
 	check  *ebpf.Program
 }
 
-func runBpfProgram(prog *ebpf.Program, data, ctx []byte) (statusCode uint32, dataOut, ctxOut []byte, err error) {
+func runBpfProgram(prog *ebpf.Program, data, ctx []byte, benchmark bool) (statusCode uint32, dataOut, ctxOut []byte, err error) {
 	dataOut = make([]byte, len(data))
 	if len(dataOut) > 0 {
 		// See comments at https://github.com/cilium/ebpf/blob/20c4d8896bdde990ce6b80d59a4262aa3ccb891d/prog.go#L563-L567
@@ -39,6 +40,9 @@ func runBpfProgram(prog *ebpf.Program, data, ctx []byte) (statusCode uint32, dat
 		Context:    ctx,
 		ContextOut: ctxOut,
 		Repeat:     1,
+	}
+	if benchmark {
+		opts.Repeat = 5000000
 	}
 	ret, err := prog.Run(opts)
 	return ret, opts.DataOut, ctxOut, err
@@ -120,7 +124,7 @@ func Test(t *testing.T) {
 		// sizeof(struct __sk_buff) < 256, let's make it 256
 		ctx := make([]byte, 256)
 
-		statusCode, data, ctx, err := runBpfProgram(progset.pktgen, data, ctx)
+		statusCode, data, ctx, err := runBpfProgram(progset.pktgen, data, ctx, false)
 		if err != nil {
 			t.Fatalf("error while running pktgen prog: %s", err)
 		}
@@ -129,17 +133,19 @@ func Test(t *testing.T) {
 			t.Fatalf("error while running pktgen program: unexpected status code: %d", statusCode)
 		}
 
-		statusCode, data, ctx, err = runBpfProgram(progset.setup, data, ctx)
+		currentTime := time.Now()
+		statusCode, data, ctx, err = runBpfProgram(progset.setup, data, ctx, true)
 		if err != nil {
 			printBpfDebugLog(t)
 			t.Fatalf("error while running setup prog: %s", err)
 		}
+		println(time.Since(currentTime).String())
 
 		status := make([]byte, 4)
 		nl.NativeEndian().PutUint32(status, statusCode)
 		data = append(status, data...)
 
-		statusCode, data, ctx, err = runBpfProgram(progset.check, data, ctx)
+		statusCode, data, ctx, err = runBpfProgram(progset.check, data, ctx, false)
 		if err != nil {
 			t.Fatalf("error while running check program: %+v", err)
 		}
