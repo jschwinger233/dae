@@ -3,7 +3,10 @@
 
 //go:build exclude
 
+/*
 #define __DEBUG
+#define __DEBUG_ROUTING
+*/
 
 #include "../tproxy.c"
 
@@ -53,7 +56,7 @@ int testpktgen_hijack_by_port_80(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 	tcp->source = bpf_htons(19233);
-	tcp->dest = bpf_htons(80);
+	tcp->dest = bpf_htons(79);
 	tcp->syn = 1;
 
 	return TC_ACT_OK;
@@ -74,7 +77,23 @@ int testsetup_hijack_by_port_80(struct __sk_buff *skb)
 	ms.must = false;
 	ms.mark = 0;
 
-	bpf_map_update_elem(&routing_map, &zero_key, &ms, BPF_ANY);
+	int i = 0;
+	for (i = 0; i < 50; i++) {
+		pr.port_start = 80 + i;
+		pr.port_end = 80 + i;
+		ms.port_range = pr;
+		int key = i;
+		bpf_map_update_elem(&routing_map, &key, &ms, BPF_ANY);
+	}
+
+	__builtin_memset(&ms.__value, 0, sizeof(ms.__value));
+	ms.not = false;
+	ms.type = MatchType_Fallback;
+	ms.outbound = 2;
+	ms.must = false;
+	ms.mark = 0;
+	bpf_map_update_elem(&routing_map, &i, &ms, BPF_ANY);
+
 	bpf_tail_call(skb, &entry_call_map, 0);
 	return TC_ACT_OK;
 }
@@ -126,8 +145,8 @@ int testcheck_hijack_by_port_80(struct __sk_buff *skb)
 		bpf_printk("data + sizeof(*tcp) > data_end\n");
 		return TC_ACT_SHOT;
 	}
-	if (tcp->dest != bpf_htons(80)) {
-		bpf_printk("tcp->dest != 80\n");
+	if (tcp->dest != bpf_htons(79)) {
+		bpf_printk("tcp->dest != 79\n");
 		return TC_ACT_SHOT;
 	}
 
